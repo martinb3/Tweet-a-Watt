@@ -3,6 +3,11 @@ import serial, time, datetime, sys
 from xbee import xbee
 import twitter
 import sensorhistory
+import rrdtool
+import tweepy
+import datetime
+import os
+from settings import *
 
 # use App Engine? or log file? comment out next line if appengine
 LOGFILENAME = "powerdatalog.csv"   # where we will store our flatfile data
@@ -20,7 +25,7 @@ if GRAPHIT:
     from pylab import *
 
 
-SERIALPORT = "COM4"    # the com/serial port the XBee is connected to
+SERIALPORT = "/dev/ttyUSB0"    # the com/serial port the XBee is connected to
 BAUDRATE = 9600      # the baud rate we talk to the xbee
 CURRENTSENSE = 4       # which XBee ADC has current draw data
 VOLTSENSE = 0          # which XBee ADC has mains voltage data
@@ -34,22 +39,24 @@ vrefcalibration = [492,  # Calibration for sensor #0
 CURRENTNORM = 15.5  # conversion to amperes from ADC
 NUMWATTDATASAMPLES = 1800 # how many samples to watch in the plot window, 1 hr @ 2s samples
 
-# Twitter username & password
-twitterusername = "username"
-twitterpassword = "password"
+auth = tweepy.OAuthHandler(CONSUMER_KEY, CONSUMER_SECRET)
+auth.set_access_token(ACCESS_KEY, ACCESS_SECRET)
+api = tweepy.API(auth)
 
 def TwitterIt(u, p, message):
-    api = twitter.Api(username=u, password=p)
-    print u, p
-    try:
-        status = api.PostUpdate(message)
-        print "%s just posted: %s" % (status.user.name, status.text)
-    except UnicodeDecodeError:
-        print "Your message could not be encoded.  Perhaps it contains non-ASCII characters? "
-        print "Try explicitly specifying the encoding with the  it with the --encoding flag"
-    except:
-        print "Couldn't connect, check network, username and password!"
-
+  #api = twitter.Api(username=u, password=p)
+  #print u, p
+  try:
+    #status = api.PostUpdate(message)
+    api.update_status(message)
+    #print "%s just posted: %s" % (status.user.name, status.text)
+    print "twittered: ", message
+    #print "%s just posted: %s" % (status.user.name, status.text)
+  except UnicodeDecodeError:
+    print "Your message could not be encoded. Perhaps it contains non-ASCII characters? "
+    print "Try explicitly specifying the encoding with the it with the --encoding flag"
+  except:
+    print "Couldn't connect, check network, username and password!"
 
 # open up the FTDI serial port to get data transmitted to xbee
 ser = serial.Serial(SERIALPORT, BAUDRATE)
@@ -108,11 +115,16 @@ if GRAPHIT:
 twittertimer = 0
 
 sensorhistories = sensorhistory.SensorHistories(logfile)
-print sensorhistories
+#print sensorhistories
+
+# remember that over 100 VA is coffee burner on, currently not in coffee
+coffeecutoff = 100
+incoffee = False
 
 # the 'main loop' runs once a second or so
 def update_graph(idleevent):
-    global avgwattdataidx, sensorhistories, twittertimer, DEBUG
+    global avgwattdataidx, sensorhistories, twittertimer, DEBUG, incoffee, coffeecutoff
+    shouldtweet = False
      
     # grab one packet from the xbee, or timeout
     packet = xbee.find_packet(ser)
@@ -170,8 +182,8 @@ def update_graph(idleevent):
         # that converts the ADC reading to Amperes
         ampdata[i] /= CURRENTNORM
 
-    #print "Voltage, in volts: ", voltagedata
-    #print "Current, in amps:  ", ampdata
+    print "Voltage, in volts: ", voltagedata
+    print "Current, in amps:  ", ampdata
 
     # calculate instant. watts, by multiplying V*I for each sample point
     wattdata = [0] * len(voltagedata)
@@ -193,13 +205,21 @@ def update_graph(idleevent):
         avgwatt += abs(wattdata[i])
     avgwatt /= 17.0
 
+    if (avgamp > 13):
+        return            # hmm, bad data
 
     # Print out our most recent measurements
     print str(xb.address_16)+"\tCurrent draw, in amperes: "+str(avgamp)
     print "\tWatt draw, in VA: "+str(avgwatt)
 
-    if (avgamp > 13):
-        return            # hmm, bad data
+    if(avgwatt > coffeecutoff and incoffee == False):
+      print "MAKING COFFEE!!!\n"
+      incoffee = True
+      shouldtweet = True
+    elif(avgwatt < coffeecutoff and incoffee == True):
+      print "NO MORE COFFEE :(\n"
+      incoffee = False
+      shouldtweet = True
 
     if GRAPHIT:
         # Add the current watt usage to our graph history
@@ -216,7 +236,7 @@ def update_graph(idleevent):
 
     # retreive the history for this sensor
     sensorhistory = sensorhistories.find(xb.address_16)
-    #print sensorhistory
+    print sensorhistory
     
     # add up the delta-watthr used since last reading
     # Figure out how many watt hours were used since last reading
@@ -257,7 +277,8 @@ def update_graph(idleevent):
     # Determine the hour of the day (ie 6:42 -> '6')
     currhour = datetime.datetime.now().hour
     # twitter every 8 hours
-    if (((time.time() - twittertimer) >= 3660.0) and (currhour % 8 == 0)):
+    if (shouldtweet): #((time.time() - twittertimer) >= 3660.0) and (currhour % 8 == 0)):
+	shouldtweet = False
         print "twittertime!"
         twittertimer = time.time();
         if not LOGFILENAME:
@@ -271,7 +292,12 @@ def update_graph(idleevent):
                 whused += history.dayswatthr
                 
             message = "Currently using "+str(int(wattsused))+" Watts, "+str(int(whused))+" Wh today so far #tweetawatt"
-            # write something ourselves
+
+            if(incoffee):
+              message = "Made coffee!!! %s #happyday" % (datetime.datetime.now())
+            else:
+              message = "No more coffee %s #sadface" % (datetime.datetime.now())
+            # write sometdatetime.datetime.now() hindatetime.datetime.now() g ourselves
         if message:
             print message
             TwitterIt(twitterusername, twitterpassword, message)
